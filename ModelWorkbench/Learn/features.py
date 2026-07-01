@@ -1936,32 +1936,142 @@ def _add_features_US500(df: pd.DataFrame, include_mtf: bool = False, regime_para
     Generated automatically - edit with care.
 
     Pass regime_params to enable the causal market regime feature (fl_regime).
+
+    This is a memory-optimised version that computes only the 16 selected
+    features directly, avoiding the overhead of add_feature_library() which
+    generates 185+ columns.
     """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", pd.errors.PerformanceWarning)
-        df = add_feature_library(df, include_mtf=include_mtf, regime_params=regime_params)
     df = df.copy()
+    eps = 1e-9
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    open_ = df['Open']
+    vol = df['Volume'].astype(float)
+
+    # ── Shared intermediates ──────────────────────────────────────────────────
+    atr14 = talib.ATR(high, low, close, timeperiod=14)
+    log_ret = np.log(close / close.shift(1))
+    hl_range = high - low
+
+    # ── MTF features (lightweight, only needed indicators) ────────────────────
+    # Determine timeframes from base frequency
+    timeframes = _default_mtf_timeframes(df)
+
+    if 'Time' in df.columns:
+        df_idx = df.set_index('Time')
+    else:
+        df_idx = df
+
+    for tf in timeframes:
+        tf_min = _tf_to_minutes(tf)
+        base_min = _infer_base_minutes(df)
+        if np.isfinite(base_min) and np.isfinite(tf_min) and tf_min <= base_min:
+            continue
+
+        # Resample
+        df_tf = df_idx[['Open', 'High', 'Low', 'Close', 'Volume']].resample(tf).agg({
+            'Open': 'first', 'High': 'max', 'Low': 'min',
+            'Close': 'last', 'Volume': 'sum'
+        }).dropna()
+
+        # Compute only the indicators needed for this timeframe
+        # 5min: ADX
+        if tf == '5min':
+            df_tf['MTF_5min_adx'] = talib.ADX(
+                df_tf['High'], df_tf['Low'], df_tf['Close'], timeperiod=14
+            ) / 100.0
+
+        # 15min: slope, time_in_trend (from donchian_trend)
+        if tf == '15min':
+            df_tf['MTF_15min_slope'] = rolling_slope_logprice(df_tf['Close'], window=10)
+            dt_15 = donchian_trend(df_tf, length=20)
+            df_tf['MTF_15min_time_in_trend'] = time_in_trend(dt_15)
+
+        # 30min: ROC, RSI, ADX, time_in_trend (from donchian_trend)
+        if tf == '30min':
+            df_tf['MTF_30min_roc'] = talib.ROC(df_tf['Close'], timeperiod=10) / 100.0
+            df_tf['MTF_30min_rsi'] = talib.RSI(df_tf['Close'], timeperiod=14) / 100.0
+            df_tf['MTF_30min_adx'] = talib.ADX(
+                df_tf['High'], df_tf['Low'], df_tf['Close'], timeperiod=14
+            ) / 100.0
+            dt_30 = donchian_trend(df_tf, length=20)
+            df_tf['MTF_30min_time_in_trend'] = time_in_trend(dt_30)
+
+        # Shift by 1 for causality, then forward-fill to base timeframe
+        mtf_cols = [c for c in df_tf.columns if c.startswith('MTF_')]
+        df_tf_aligned = df_tf.copy()
+        df_tf_aligned[mtf_cols] = df_tf_aligned[mtf_cols].shift(1)
+
+        for col in mtf_cols:
+            df_idx[col] = df_tf_aligned[col].reindex(df_idx.index, method='ffill')
+
+    # Reset index
+    if 'Time' in df.columns:
+        df = df_idx.reset_index()
+    else:
+        df = df_idx
+
+    # ── Time features ─────────────────────────────────────────────────────────
+    _h = df['Time'].dt.hour + df['Time'].dt.minute / 60.0
+    df['fl_hour_sin'] = np.sin(2 * np.pi * _h / 24.0)
+    df['fl_hour_cos'] = np.cos(2 * np.pi * _h / 24.0)
+
+    # ── Direct features ───────────────────────────────────────────────────────
+    # fl_atr_ratio_14: current ATR vs rolling average
+    df['fl_atr_ratio_14'] = atr14 / (atr14.rolling(60).mean() + eps)
+
+    # fl_rv_60: realised volatility
+    df['fl_rv_60'] = log_ret.rolling(60).std()
+
+    # fl_adx14: ADX on base timeframe
+    df['fl_adx14'] = talib.ADX(high, low, close, timeperiod=14) / 100.0
+
+    # fl_close_loc: position within candle range
+    df['fl_close_loc'] = (close - low) / (hl_range + eps)
+
+    # fl_hl_range_atr: candle range normalised by ATR
+    df['fl_hl_range_atr'] = hl_range / (atr14 + eps)
+
+    # fl_ichi_senA_vs_senB: Ichimoku cloud thickness
+    tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2.0
+    kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2.0
+    senA = ((tenkan + kijun) / 2.0).shift(26)
+    senB = ((high.rolling(52).max() + low.rolling(52).min()) / 2.0).shift(26)
+    df['fl_ichi_senA_vs_senB'] = (senA - senB) / (atr14 + eps)
+
+    # fl_parkinson_20: Parkinson volatility
+    df['fl_parkinson_20'] = (np.log((high + eps) / (low + eps)) ** 2).rolling(20).mean()
+
+    # ── Regime (optional) ─────────────────────────────────────────────────────
+    if regime_params is not None:
+        df['fl_regime'] = causal_market_regime(df, **regime_params)
+
+    # ── Select only the needed columns ────────────────────────────────────────
     _keep = [
         c for c in [
             'MTF_30min_roc',
-        'MTF_30min_rsi',
-        'MTF_5min_adx',
-        'fl_hour_sin',
-        'MTF_15min_slope',
-        'fl_atr_ratio_14',
-        'fl_rv_60',
-        'fl_adx14',
-        'MTF_30min_adx',
-        'fl_close_loc',
-        'MTF_15min_time_in_trend',
-        'MTF_30min_time_in_trend',
-        'fl_hour_cos',
-        'fl_hl_range_atr',
-        'fl_ichi_senA_vs_senB',
-        'fl_parkinson_20',
+            'MTF_30min_rsi',
+            'MTF_5min_adx',
+            'fl_hour_sin',
+            'MTF_15min_slope',
+            'fl_atr_ratio_14',
+            'fl_rv_60',
+            'fl_adx14',
+            'MTF_30min_adx',
+            'fl_close_loc',
+            'MTF_15min_time_in_trend',
+            'MTF_30min_time_in_trend',
+            'fl_hour_cos',
+            'fl_hl_range_atr',
+            'fl_ichi_senA_vs_senB',
+            'fl_parkinson_20',
         ]
         if c in df.columns
     ]
+    if regime_params is not None and 'fl_regime' in df.columns:
+        _keep.insert(0, 'fl_regime')
+
     _ohlcv = [c for c in ["Time", "Open", "High", "Low", "Close", "Volume", "target", "sell_y", "buy_y"]
               if c in df.columns]
     _final = _ohlcv + [c for c in _keep if c not in _ohlcv]
