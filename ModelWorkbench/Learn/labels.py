@@ -406,6 +406,169 @@ def calculate_trade_outcomes_all_candles(
     }, index=df.index)
 
 
+@njit(cache=True)
+def _compute_outcomes_capped_nb(highs, lows, atrs, tp_mult, sl_mult, max_horizon):
+    """
+    Numba-compiled inner kernel for calculate_trade_outcomes_capped.
+    Scans forward up to max_horizon bars only, matching production behaviour.
+    Returns eight float64 arrays: buy_outcomes, sell_outcomes,
+    buy_exit_prices, sell_exit_prices, buy_mfe, buy_mae, sell_mfe, sell_mae.
+    Unresolved bars stay NaN for outcomes and exit prices.
+    """
+    n = len(highs)
+    buy_outcomes = np.full(n, np.nan)
+    sell_outcomes = np.full(n, np.nan)
+    buy_exit_prices = np.full(n, np.nan)
+    sell_exit_prices = np.full(n, np.nan)
+    buy_mfe = np.full(n, np.nan)
+    buy_mae = np.full(n, np.nan)
+    sell_mfe = np.full(n, np.nan)
+    sell_mae = np.full(n, np.nan)
+
+    for t0 in range(n - 1):
+        atr = atrs[t0]
+        if np.isnan(atr) or atr == 0.0:
+            continue
+
+        entry_buy = highs[t0]
+        tp_buy = entry_buy + tp_mult * atr
+        sl_buy = entry_buy - sl_mult * atr
+        tp_buy_dist = tp_buy - entry_buy
+        sl_buy_dist = entry_buy - sl_buy
+
+        entry_sell = lows[t0]
+        tp_sell = entry_sell - tp_mult * atr
+        sl_sell = entry_sell + sl_mult * atr
+        tp_sell_dist = entry_sell - tp_sell
+        sl_sell_dist = sl_sell - entry_sell
+
+        buy_resolved = False
+        sell_resolved = False
+        buy_exit_type = 0
+        sell_exit_type = 0
+        buy_max_high = entry_buy
+        buy_min_low = entry_buy
+        sell_max_high = entry_sell
+        sell_min_low = entry_sell
+
+        horizon = min(t0 + 1 + max_horizon, n)
+        for t1 in range(t0 + 1, horizon):
+            h = highs[t1]
+            l = lows[t1]
+
+            if not buy_resolved:
+                if h >= tp_buy:
+                    buy_outcomes[t0] = 1.0
+                    buy_exit_prices[t0] = tp_buy
+                    buy_resolved = True
+                    buy_exit_type = 1
+                elif l <= sl_buy:
+                    buy_outcomes[t0] = -1.0
+                    buy_exit_prices[t0] = sl_buy
+                    buy_resolved = True
+                    buy_exit_type = -1
+
+            if not sell_resolved:
+                if l <= tp_sell:
+                    sell_outcomes[t0] = 1.0
+                    sell_exit_prices[t0] = tp_sell
+                    sell_resolved = True
+                    sell_exit_type = 1
+                elif h >= sl_sell:
+                    sell_outcomes[t0] = -1.0
+                    sell_exit_prices[t0] = sl_sell
+                    sell_resolved = True
+                    sell_exit_type = -1
+
+            if not np.isnan(h):
+                if not buy_resolved or buy_exit_type == 1:
+                    if h > buy_max_high:
+                        buy_max_high = h
+                if not sell_resolved or sell_exit_type == -1:
+                    if h > sell_max_high:
+                        sell_max_high = h
+            if not np.isnan(l):
+                if not buy_resolved or buy_exit_type == -1:
+                    if l < buy_min_low:
+                        buy_min_low = l
+                if not sell_resolved or sell_exit_type == 1:
+                    if l < sell_min_low:
+                        sell_min_low = l
+
+            if buy_resolved and sell_resolved:
+                break
+
+        if tp_buy_dist > 0.0:
+            buy_mfe[t0] = min(max((buy_max_high - entry_buy) / tp_buy_dist, 0.0), 1.0)
+        if sl_buy_dist > 0.0:
+            buy_mae[t0] = min(max((entry_buy - buy_min_low) / sl_buy_dist, 0.0), 1.0)
+        if tp_sell_dist > 0.0:
+            sell_mfe[t0] = min(max((entry_sell - sell_min_low) / tp_sell_dist, 0.0), 1.0)
+        if sl_sell_dist > 0.0:
+            sell_mae[t0] = min(max((sell_max_high - entry_sell) / sl_sell_dist, 0.0), 1.0)
+
+    return (
+        buy_outcomes,
+        sell_outcomes,
+        buy_exit_prices,
+        sell_exit_prices,
+        buy_mfe,
+        buy_mae,
+        sell_mfe,
+        sell_mae,
+    )
+
+
+def calculate_trade_outcomes_capped(
+    df,
+    atr_window=14,
+    tp_mult=4.0,
+    sl_mult=2.0,
+    max_horizon=30,
+):
+    """
+    Calculate trade outcomes for BOTH buy and sell at every candle,
+    capped at max_horizon bars forward (matching production behaviour).
+
+    Outcome encoding:
+      1: Take Profit hit
+     -1: Stop Loss hit
+     NaN: Neither TP nor SL reached within max_horizon bars
+
+    MFE/MAE are normalized to [0, 1] using the TP and SL distances.
+    """
+    df = df.copy()
+    df["atr"] = ATR(df['High'], df['Low'], df['Close'], timeperiod=atr_window)
+
+    highs = df['High'].values.astype(np.float64)
+    lows = df['Low'].values.astype(np.float64)
+    atrs = df['atr'].values.astype(np.float64)
+
+    (
+        buy_out,
+        sell_out,
+        buy_exit,
+        sell_exit,
+        buy_mfe,
+        buy_mae,
+        sell_mfe,
+        sell_mae,
+    ) = _compute_outcomes_capped_nb(
+        highs, lows, atrs, float(tp_mult), float(sl_mult), int(max_horizon)
+    )
+
+    return pd.DataFrame({
+        'buy_outcome': buy_out,
+        'sell_outcome': sell_out,
+        'buy_exit_price': buy_exit,
+        'sell_exit_price': sell_exit,
+        'buy_MFE': buy_mfe,
+        'buy_MAE': buy_mae,
+        'sell_MFE': sell_mfe,
+        'sell_MAE': sell_mae,
+    }, index=df.index)
+
+
 def create_quality_targets(
     df: pd.DataFrame,
     lookahead_bars: int,
