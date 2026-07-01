@@ -2076,3 +2076,141 @@ def _add_features_US500(df: pd.DataFrame, include_mtf: bool = False, regime_para
               if c in df.columns]
     _final = _ohlcv + [c for c in _keep if c not in _ohlcv]
     return df[_final]
+
+
+def _add_features_US500_v2(
+    df: pd.DataFrame,
+    include_mtf: bool = True,
+    regime_params: dict = None,
+    selected_features: list = None,
+) -> pd.DataFrame:
+    """
+    Enhanced US500 feature set using the full feature library with automated selection.
+
+    If selected_features is provided, only those features are kept.
+    Otherwise, the full library is generated (for feature selection runs).
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', pd.errors.PerformanceWarning)
+        df = add_feature_library(df, include_mtf=include_mtf, regime_params=regime_params)
+
+    if selected_features is not None:
+        _keep = [c for c in selected_features if c in df.columns]
+        _ohlcv = [c for c in ['Time', 'Open', 'High', 'Low', 'Close', 'Volume']
+                  if c in df.columns]
+        _final = _ohlcv + [c for c in _keep if c not in _ohlcv]
+        return df[_final]
+
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Automated Feature Selection Utilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+from sklearn.feature_selection import mutual_info_regression
+from scipy.spatial.distance import correlation as spearman_corr
+
+
+def select_features_by_mi(
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_features: int = 80,
+    random_state: int = 42,
+) -> list:
+    """
+    Select top N features by mutual information with the target.
+    Handles NaNs by dropping rows with any NaN in X or y.
+    """
+    # Drop rows with NaN
+    valid = pd.concat([X, y], axis=1).dropna()
+    X_clean = valid[X.columns]
+    y_name = y.name if hasattr(y, 'name') and y.name is not None else 'target'
+    y_clean = valid[y_name]
+
+    mi = mutual_info_regression(
+        X_clean.values, y_clean.values,
+        random_state=random_state,
+    )
+    mi_series = pd.Series(mi, index=X_clean.columns).sort_values(ascending=False)
+    return mi_series.head(n_features).index.tolist()
+
+
+def deduplicate_features_by_correlation(
+    X: pd.DataFrame,
+    features: list,
+    correlation_threshold: float = 0.95,
+) -> list:
+    """
+    Remove highly correlated features, keeping the one with higher variance.
+    """
+    X_subset = X[features]
+    corr_matrix = X_subset.corr().abs()
+    upper = corr_matrix.where(
+        np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+    )
+
+    to_drop = set()
+    for col in upper.columns:
+        if col in to_drop:
+            continue
+        high_corr = upper[col][upper[col] > correlation_threshold].index.tolist()
+        for hc in high_corr:
+            # Keep the feature with higher variance
+            if X_subset[col].var() >= X_subset[hc].var():
+                to_drop.add(hc)
+            else:
+                to_drop.add(col)
+                break
+
+    return [f for f in features if f not in to_drop]
+
+
+def select_features_pipeline(
+    df: pd.DataFrame,
+    target_col: str,
+    n_features: int = 80,
+    correlation_threshold: float = 0.95,
+    random_state: int = 42,
+    include_mtf: bool = True,
+    regime_params: dict = None,
+) -> list:
+    """
+    Full feature selection pipeline:
+    1. Generate all features via add_feature_library
+    2. Remove non-numeric and constant features
+    3. Select top N by mutual information
+    4. Deduplicate by correlation
+    """
+    # Generate full feature set
+    df_feat = add_feature_library(
+        df, include_mtf=include_mtf, fast_mode=False, regime_params=regime_params
+    )
+
+    # Identify feature columns (exclude OHLCV, Time, target)
+    exclude = {'Time', 'Open', 'High', 'Low', 'Close', 'Volume', target_col}
+    feature_candidates = [
+        c for c in df_feat.columns
+        if c not in exclude
+        and pd.api.types.is_numeric_dtype(df_feat[c])
+        and df_feat[c].nunique() > 1  # Remove constant features
+    ]
+
+    X = df_feat[feature_candidates]
+    y = df_feat[[target_col]]
+
+    # MI selection
+    selected = select_features_by_mi(X, y, n_features=n_features * 2, random_state=random_state)
+
+    # Correlation dedup
+    selected = deduplicate_features_by_correlation(
+        X, selected, correlation_threshold=correlation_threshold
+    )
+
+    # Trim to exact n_features
+    mi = mutual_info_regression(
+        X[selected].values, y.values.ravel(),
+        random_state=random_state,
+    )
+    mi_series = pd.Series(mi, index=selected).sort_values(ascending=False)
+    return mi_series.head(n_features).index.tolist()
