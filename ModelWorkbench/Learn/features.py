@@ -2197,7 +2197,7 @@ def select_features_pipeline(
     ]
 
     X = df_feat[feature_candidates]
-    y = df_feat[[target_col]]
+    y = df_feat[target_col]
 
     # MI selection
     selected = select_features_by_mi(X, y, n_features=n_features * 2, random_state=random_state)
@@ -2208,8 +2208,14 @@ def select_features_pipeline(
     )
 
     # Trim to exact n_features
+    # Drop NaN rows before MI computation (features from rolling windows may have NaN)
+    X_trim = X[selected]
+    valid_mask = ~(X_trim.isna().any(axis=1) | y.isna())
+    X_clean = X_trim[valid_mask]
+    y_clean = y[valid_mask]
+
     mi = mutual_info_regression(
-        X[selected].values, y.values.ravel(),
+        X_clean.values, y_clean.values.ravel(),
         random_state=random_state,
     )
     mi_series = pd.Series(mi, index=selected).sort_values(ascending=False)
