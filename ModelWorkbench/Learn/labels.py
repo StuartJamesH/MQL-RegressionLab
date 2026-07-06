@@ -536,6 +536,11 @@ def calculate_trade_outcomes_capped(
      NaN: Neither TP nor SL reached within max_horizon bars
 
     MFE/MAE are normalized to [0, 1] using the TP and SL distances.
+
+    Also returns `buy_class`/`sell_class`: an integer 3-class encoding of the
+    same outcome (1=TP, 0=SL, 2=timeout/unresolved) intended for training a
+    win/loss/timeout classifier alongside a magnitude regressor that is fit
+    only on resolved (class 0 or 1) rows.
     """
     df = df.copy()
     df["atr"] = ATR(df['High'], df['Low'], df['Close'], timeperiod=atr_window)
@@ -557,6 +562,9 @@ def calculate_trade_outcomes_capped(
         highs, lows, atrs, float(tp_mult), float(sl_mult), int(max_horizon)
     )
 
+    buy_class = np.where(buy_out == 1.0, 1, np.where(buy_out == -1.0, 0, 2)).astype(np.int64)
+    sell_class = np.where(sell_out == 1.0, 1, np.where(sell_out == -1.0, 0, 2)).astype(np.int64)
+
     return pd.DataFrame({
         'buy_outcome': buy_out,
         'sell_outcome': sell_out,
@@ -566,7 +574,33 @@ def calculate_trade_outcomes_capped(
         'buy_MAE': buy_mae,
         'sell_MFE': sell_mfe,
         'sell_MAE': sell_mae,
+        'buy_class': buy_class,
+        'sell_class': sell_class,
     }, index=df.index)
+
+
+def resolution_rate_by_horizon(df, atr_window, tp_mult, sl_mult, horizon_candidates):
+    """
+    For each candidate max_horizon, compute the fraction of buy/sell trades that
+    resolve (hit TP or SL) within that horizon.
+
+    Reuses `calculate_trade_outcomes_capped` once per candidate horizon (simplicity
+    over speed - this runs once per training session, not in a hot loop).
+
+    Returns a DataFrame indexed by horizon with columns:
+      buy_resolved_rate, sell_resolved_rate
+    """
+    rows = []
+    for h in horizon_candidates:
+        outcomes = calculate_trade_outcomes_capped(
+            df, atr_window=atr_window, tp_mult=tp_mult, sl_mult=sl_mult, max_horizon=int(h),
+        )
+        rows.append({
+            "horizon": int(h),
+            "buy_resolved_rate": float(outcomes["buy_outcome"].notna().mean()),
+            "sell_resolved_rate": float(outcomes["sell_outcome"].notna().mean()),
+        })
+    return pd.DataFrame(rows).set_index("horizon")
 
 
 def create_quality_targets(
