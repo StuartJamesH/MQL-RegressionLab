@@ -9,3 +9,10 @@ data/*
 
 # Python cache
 __pycache__/
+
+# Archive folders
+.archive/
+
+# Beads state
+.beads/
+beads.conf
