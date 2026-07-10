@@ -1,8 +1,11 @@
 """
 fetch_datasets_bulk.py — Download multiple OHLCV datasets in one run.
 
-Run from the repository root:
+Windows — run from the repository root:
     .\.venv\Scripts\python.exe .\ModelWorkbench\fetch_datasets_bulk.py
+
+Linux — run from the repository root:
+    .venv/bin/python ModelWorkbench/fetch_datasets_bulk.py
 
 Because this script lives inside ``ModelWorkbench``, it can import
 ``Learn.data.fetch_ohlcv_bulk`` directly.
