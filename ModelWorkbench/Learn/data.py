@@ -15,6 +15,7 @@ import calendar
 import datetime
 import os
 import pathlib
+import signal
 from typing import Any, Iterable, Optional
 
 import numpy as np
@@ -205,7 +206,7 @@ def _fetch_ohlcv_bulk_data(
         print("\nMessage received:\n", Protobuf.extract(message))
 
     def _disconnected(_client: Client, reason: Any) -> None:
-        print("\nDisconnected:", reason)
+        print(f"\nDisconnected: {reason}")
 
     def _fetch_chunk(chunk_index: int) -> None:
         requests = state["requests"]
@@ -224,7 +225,9 @@ def _fetch_ohlcv_bulk_data(
 
         state["chunk_index"] = chunk_index
         my_generation = state["generation"]
-        deferred = client.send(requests[chunk_index])
+        # Use a generous per-request timeout so that transient connection drops
+        # have time to recover without the timeout competing with retries.
+        deferred = client.send(requests[chunk_index], responseTimeoutInSeconds=30)
 
         def _on_success(chunk_result: Any) -> None:
             trendbars = Protobuf.extract(chunk_result)
@@ -233,7 +236,7 @@ def _fetch_ohlcv_bulk_data(
             state["chunk_retries"] = 0
             print(
                 f"\nFetched {symbol_name} chunk {chunk_index + 1}/{len(requests)}, "
-                f"bars: {len(bars_data)}"
+                f"bars: {len(bars_data)}",
             )
             _fetch_chunk(chunk_index + 1)
 
@@ -243,26 +246,18 @@ def _fetch_ohlcv_bulk_data(
             if state["generation"] != my_generation:
                 return
 
-            exc = getattr(failure, "value", failure)
-            is_transient = (
-                "ConnectionLost" in str(failure)
-                or "ConnectionDone" in str(failure)
-                or "TimeoutError" in type(exc).__name__
-            )
-            if is_transient and state["chunk_retries"] < MAX_CHUNK_RETRIES:
+            if state["chunk_retries"] < MAX_CHUNK_RETRIES:
                 state["chunk_retries"] += 1
                 print(
-                    f"\nChunk {chunk_index + 1} failed (transient, retry "
+                    f"\nChunk {chunk_index + 1} failed (retry "
                     f"{state['chunk_retries']}/{MAX_CHUNK_RETRIES}) — "
-                    f"waiting for reconnect to resume..."
+                    f"retrying in 2 seconds...",
                 )
-                # Do NOT stop the reactor. The cTrader client will reconnect
-                # automatically and _connected → auth → _account_auth_response_callback
-                # will call _fetch_chunk(chunk_index) to retry.
+                reactor.callLater(2, _fetch_chunk, chunk_index)
             else:
                 print(
                     f"\nChunk {chunk_index + 1} failed permanently "
-                    f"(retries exhausted or non-transient error)."
+                    f"(retries exhausted).",
                 )
                 _on_error(failure)
 
@@ -346,6 +341,19 @@ def _fetch_ohlcv_bulk_data(
     client.setConnectedCallback(_connected)
     client.setDisconnectedCallback(_disconnected)
     client.setMessageReceivedCallback(_on_message_received)
+
+    # Suppress signal-based reactor shutdown so that transient connection
+    # drops don't get short-circuited by a racing SIGTERM/SIGINT handler.
+    # Errors are still handled explicitly via _on_error / _record_error.
+    def _ignore_signals() -> None:
+        for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
+            if sig is not None:
+                try:
+                    signal.signal(sig, signal.SIG_IGN)
+                except (ValueError, OSError):
+                    pass
+
+    reactor.callWhenRunning(_ignore_signals)
 
     client.startService()
     reactor.run()
