@@ -9,8 +9,11 @@ import numpy as np
 import pandas as pd
 import scipy.stats as stats
 import lightgbm as lgb
-from lightgbm import LGBMRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from lightgbm import LGBMRegressor, LGBMClassifier
+from sklearn.metrics import (
+    mean_absolute_error, mean_squared_error, r2_score,
+    average_precision_score, log_loss,
+)
 
 
 def load_ohlcv(ds_name, n_rows=None):
@@ -153,6 +156,81 @@ def tune_lgbm_by_spearman(
     results = pd.DataFrame(rows).sort_values(
         ["robust_score", "mean_spearman", "mean_r2"],
         ascending=[False, False, False],
+    ).reset_index(drop=True)
+    best = results.iloc[0].to_dict()
+    return results, best
+
+
+def tune_lgbm_classifier(
+    X,
+    y,
+    folds,
+    candidate_params,
+    base_params,
+    sample_weight=None,
+    early_stopping_rounds=200,
+    robustness_penalty=0.25,
+):
+    """
+    Tune hyper-parameter candidates for the 3-class win/loss/timeout classifier
+    (0=SL, 1=TP, 2=timeout) via walk-forward cross-validation.
+
+    Scores each fold by average_precision_score for the TP class (label 1,
+    one-vs-rest), since predicting "does this setup resolve as a winning trade"
+    is what ultimately feeds pred_long/pred_short at inference time. Ranks
+    candidates by a robust score = mean TP-PR-AUC - penalty * std TP-PR-AUC, then
+    mean TP-PR-AUC. Returns (results_df, best_cfg_dict) with the same shape as
+    tune_lgbm_by_spearman so callers can use both functions symmetrically.
+    """
+    rows = []
+    for cfg_i, cfg in enumerate(candidate_params, start=1):
+        fold_rows = []
+        best_iters = []
+        for tr_idx, va_idx in folds:
+            model = LGBMClassifier(**{**base_params, **cfg, "objective": "multiclass", "num_class": 3})
+            fit_kwargs = {
+                "X": X[tr_idx],
+                "y": y[tr_idx],
+                "eval_set": [(X[va_idx], y[va_idx])],
+                "callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=False)],
+            }
+            if sample_weight is not None:
+                fit_kwargs["sample_weight"] = sample_weight[tr_idx]
+            model.fit(**fit_kwargs)
+
+            best_iter = getattr(model, "best_iteration_", None)
+            if best_iter is None or best_iter <= 0:
+                best_iter = model.n_estimators
+            best_iters.append(int(best_iter))
+
+            proba = model.predict_proba(X[va_idx], num_iteration=best_iter)
+            y_true_tp = (y[va_idx] == 1).astype(int)
+            tp_pr_auc = (
+                float(average_precision_score(y_true_tp, proba[:, 1]))
+                if y_true_tp.sum() > 0 else 0.0
+            )
+            fold_log_loss = float(log_loss(y[va_idx], proba, labels=[0, 1, 2]))
+            fold_rows.append({"tp_pr_auc": tp_pr_auc, "log_loss": fold_log_loss})
+
+        fold_df = pd.DataFrame(fold_rows)
+        rows.append({
+            **cfg,
+            "cfg_id": cfg_i,
+            "folds": len(fold_rows),
+            "mean_tp_pr_auc": float(fold_df["tp_pr_auc"].mean()),
+            "std_tp_pr_auc": float(fold_df["tp_pr_auc"].std(ddof=0)),
+            "mean_log_loss": float(fold_df["log_loss"].mean()),
+            "robust_score": float(
+                fold_df["tp_pr_auc"].mean()
+                - robustness_penalty * fold_df["tp_pr_auc"].std(ddof=0)
+            ),
+            "median_best_iteration": int(np.median(best_iters)),
+            "fold_metrics": fold_rows,
+        })
+
+    results = pd.DataFrame(rows).sort_values(
+        ["robust_score", "mean_tp_pr_auc"],
+        ascending=[False, False],
     ).reset_index(drop=True)
     best = results.iloc[0].to_dict()
     return results, best

@@ -52,6 +52,7 @@ six==1.17.0
 stack-data==0.6.3
 TA-Lib==0.6.8
 threadpoolctl==3.6.0
+torch==2.12.1
 tornado==6.5.7
 traitlets==5.15.1
 typing_extensions==4.15.0
