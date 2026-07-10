@@ -16,3 +16,6 @@ __pycache__/
 # Beads state
 .beads/
 beads.conf
+
+# Model packs
+ModelPacks/
