@@ -2,10 +2,10 @@
 fetch_datasets_bulk.py — Download multiple OHLCV datasets in one run.
 
 Windows — run from the repository root:
-    .\.venv\Scripts\python.exe .\ModelWorkbench\fetch_datasets_bulk.py
+    .venv\\Scripts\\python.exe ModelWorkbench\\fetch_datasets_bulk.py
 
-Linux — run from the repository root:
-    .venv/bin/python ModelWorkbench/fetch_datasets_bulk.py
+Linux — run from the repository root (from the ModelWorkbench directory):
+    ../.venv/bin/python fetch_datasets_bulk.py
 
 Because this script lives inside ``ModelWorkbench``, it can import
 ``Learn.data.fetch_ohlcv_bulk`` directly.
@@ -30,9 +30,9 @@ SYMBOL_NAMES = [
     'SpotCrude',
 ]
 
-NUM_CHUNKS = 52 * 10 # 10 years of weekly data, split into 1-week chunks
+NUM_CHUNKS = 52 * 5 # 3 years of weekly data, split into 1-week chunks
 WEEKS_PER_CHUNK = 1
-PERIOD_STR = "M1"
+PERIOD_STR = "M5"
 
 # When True, write one CSV per symbol to data/ using the same naming convention
 # as fetch_ohlcv(). When False, return DataFrames and print a short preview.

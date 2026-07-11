@@ -18,7 +18,6 @@ import pathlib
 import signal
 from typing import Any, Iterable, Optional
 
-import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
@@ -121,15 +120,20 @@ def _build_trendbar_requests(
 
 
 def _build_ohlcv_dataframe(bars: list[list[Any]]) -> pd.DataFrame:
+    # Manual sort + dedup to avoid pandas segfault on sort_values/drop_duplicates
+    # with datetime64 columns (pandas 3.0.4 / numpy 2.4.6 bug).
+    bars.sort(key=lambda row: row[0])
+    deduped: list[list[Any]] = []
+    for bar in bars:
+        if not deduped or bar[0] != deduped[-1][0]:
+            deduped.append(bar)
     df = pd.DataFrame(
-        np.array(bars),
+        deduped,
         columns=["Time", "Open", "High", "Low", "Close", "Volume"],
-    ).drop_duplicates().reset_index(drop=True)
-
+    )
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         df[col] = pd.to_numeric(df[col])
-
-    return df.sort_values("Time").drop_duplicates().reset_index(drop=True)
+    return df
 
 
 def _default_output_path(
@@ -290,6 +294,11 @@ def _fetch_ohlcv_bulk_data(
         try:
             print("\nSymbols received")
             symbols_response = Protobuf.extract(result)
+            if hasattr(symbols_response, "errorCode") and symbols_response.errorCode:
+                raise RuntimeError(
+                    f"Symbols list request failed: "
+                    f"[{symbols_response.errorCode}] {symbols_response.description}"
+                )
             for symbol_name in symbol_names:
                 matches = [s for s in symbols_response.symbol if s.symbolName == symbol_name]
                 if len(matches) == 0:
@@ -301,7 +310,15 @@ def _fetch_ohlcv_bulk_data(
         except Exception as exc:  # pragma: no cover - callback error path
             _record_error(exc)
 
-    def _account_auth_response_callback(_result: Any) -> None:
+    def _account_auth_response_callback(result: Any) -> None:
+        response = Protobuf.extract(result)
+        if hasattr(response, "errorCode") and response.errorCode:
+            _record_error(
+                RuntimeError(
+                    f"Account auth failed: [{response.errorCode}] {response.description}"
+                )
+            )
+            return
         print("\nAccount authenticated")
         state["generation"] += 1
 
