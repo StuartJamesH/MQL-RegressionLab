@@ -26,6 +26,7 @@ matplotlib==3.11.0
 matplotlib-inline==0.2.2
 narwhals==2.22.1
 nbformat==5.10.4
+nbstripout==0.9.1
 nest-asyncio2==1.7.2
 numba==0.65.1
 numpy==2.4.6
@@ -45,6 +46,7 @@ python-dateutil==2.9.0.post0
 pyzmq==27.1.0
 referencing==0.37.0
 rpds-py==2026.5.1
+h5py==3.16.0
 scikit-learn==1.9.0
 scipy==1.17.1
 seaborn==0.13.2
@@ -52,6 +54,8 @@ six==1.17.0
 stack-data==0.6.3
 TA-Lib==0.6.8
 threadpoolctl==3.6.0
+MetaTrader5>=5.0.45
+onnxruntime>=1.16.0
 torch==2.12.1
 tornado==6.5.7
 traitlets==5.15.1

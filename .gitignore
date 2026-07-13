@@ -17,5 +17,14 @@ __pycache__/
 .beads/
 beads.conf
 
-# Model packs
+# Model packs (training outputs and deployment artifacts)
 ModelPacks/
+Engine/Model Packs/
+ModelWorkbench/ModelPacks/
+*.onnx
+model.pt
+
+# Runtime artifacts
+Engine/v2/Trade Logs/*.csv
+Engine/v2/ticketbook_*.db
+trading*.log

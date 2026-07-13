@@ -1,0 +1,4 @@
+# Strip notebook outputs and execution metadata before committing.
+# Requires nbstripout:  .venv/bin/python -m nbstripout --install
+*.ipynb filter=nbstripout
+*.ipynb diff=ipynb
