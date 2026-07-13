@@ -1,0 +1,4 @@
+# v2 runtime generated artifacts
+Trade Logs/*.csv
+ticketbook_*.db
+*.log
