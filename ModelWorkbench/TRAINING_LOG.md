@@ -231,3 +231,65 @@ print('OK')
 - **Key deps:** numba 0.66.0, h5py 3.16.0, onnx 1.22.0, onnxruntime 1.27.0
 - **Data:** XAUUSD/EURUSD/BTCUSD/US500/SpotCrude M1+M5 at `data/`
 - **Branch:** `train-v2`
+
+---
+
+## Latest Results (2026-07-15)
+
+### Run 15 — NEW BEST: Spearman 0.540, DirAcc 68.9%
+
+**Configuration:**
+- Model: d_model=128, n_layers=4, n_heads=8, d_ff=512 (1.12M params)
+- Data: 400K rows × 3 instruments (XAUUSD, BTCUSD, EURUSD M1) = 1.2M windows
+- Training: 100 epochs, lr=4e-4, wd=1e-5, dropout=0.12
+- Target: ATR-normalized MFE/MAE score at 6 horizons [5, 10, 20, 40, 60, 120]
+- Loss: Gaussian NLL + 0.5×direction BCE + 0.1×volatility MSE
+
+**Performance:**
+- **Spearman: 0.5403** (best epoch 97)
+- **Direction Accuracy: 68.9%**
+- Val Loss: 1.0507
+- Model pack: `ModelPacks/transformers/run15_100ep/model.pt`
+
+**Per-horizon Spearman:**
+| h=5 | h=10 | h=20 | h=40 | h=60 | h=120 |
+|-----|------|------|------|------|-------|
+| 0.190 | 0.301 | 0.471 | 0.659 | 0.723 | 0.708 |
+
+**Per-instrument Spearman (h=60):**
+| EURUSD | XAUUSD | BTCUSD |
+|--------|--------|--------|
+| 0.827 | 0.811 | 0.604 |
+
+### What we learned across all runs
+
+| Run | Config | Spearman | Key Finding |
+|-----|--------|----------|-------------|
+| R1 | log_return target | 0.000 | Raw returns = dead |
+| R2 | ATR score, d=64 | 0.057 | ATR score works |
+| R3 | M1+M5, 2 instr | 0.237 | Multi-instrument helps |
+| R5 | all-M1, 3 instr | 0.196 | LR too low (2e-4) |
+| R7 | lr=5e-4 | 0.402 | Higher LR = breakthrough |
+| R8 | lr=4e-4, 350K×3 | 0.431 | Stable, smooth training |
+| R10 | dropout=0.15 | 0.405 | dropout=0.12 better |
+| R12 | 400K×3, 80ep | 0.509 | More data + more epochs |
+| R13 | d=256 (wide) | 0.000 | Too wide = dead |
+| R14 | L=5 (deep) | 0.000 | Too deep = dead |
+| **R15** | **400K×3, 100ep** | **0.540** | **Best — just needs more time** |
+
+### Reproducing Run 15
+
+```bash
+cd ModelWorkbench
+../.venv/bin/python -u train_transformer.py \
+    --ds-names ../data/XAUUSD_M1_520weeks.csv ../data/BTCUSD_M1_520weeks.csv ../data/EURUSD_M1_520weeks.csv \
+    --n-rows 400000 --seq-len 256 \
+    --d-model 128 --n-layers 4 --n-heads 8 --d-ff 512 \
+    --dropout 0.12 \
+    --finetune-epochs 100 --batch-size 128 --device cuda --val-split 0.1 \
+    --lr 4e-4 --weight-decay 1e-5 \
+    --direction-weight 0.5 --volatility-weight 0.1 --target-type atr_score \
+    --output-dir ModelPacks/transformers --model-name run15_100ep
+```
+
+Expected runtime: ~7 hours on RTX 3060.
