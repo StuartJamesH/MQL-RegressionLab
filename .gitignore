@@ -28,3 +28,6 @@ model.pt
 Engine/v2/Trade Logs/*.csv
 Engine/v2/ticketbook_*.db
 trading*.log
+
+# Per-symbol launchers (copied from template)
+Engine/run_v2_*.py
