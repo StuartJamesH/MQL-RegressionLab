@@ -241,13 +241,14 @@ class MT5DataHandler:
         'D1': lambda: mt5.TIMEFRAME_D1 if mt5 is not None else None,
     }
 
-    def __init__(self, symbol: str = 'EURUSD', timeframe: str = '1min', mode: str = 'replay', start: Optional[str] = None, end: Optional[str] = None, max_bars: Optional[int] = None) -> None:
+    def __init__(self, symbol: str = 'EURUSD', timeframe: str = '1min', mode: str = 'replay', start: Optional[str] = None, end: Optional[str] = None, max_bars: Optional[int] = None, poll_interval: float = 1.0) -> None:
         self.symbol = symbol
         self.timeframe = timeframe
         self.mode = mode
         self.start = pd.to_datetime(start) if start is not None else None
         self.end = pd.to_datetime(end) if end is not None else None
         self.max_bars = max_bars
+        self.poll_interval = poll_interval
         # Timezone offset detected during live polling (in seconds)
         self.tz_offset_seconds = 0
 
@@ -327,10 +328,9 @@ class MT5DataHandler:
                 yield row
 
         elif self.mode == 'live':
-            # Yield only completed 1-minute bars at bar close.
+            # Yield only completed bars at bar close.
             # Use copy_rates_from_pos to fetch bars from current position backwards.
             # This is more reliable than time-based anchoring which may have timezone issues.
-            poll_interval = 1.0
             last_yield_time = None
             # map common MT5 timeframe constants to seconds
             TF_SECONDS = {
@@ -369,7 +369,7 @@ class MT5DataHandler:
                     rates = None
 
                 if rates is None or len(rates) == 0:
-                    time.sleep(poll_interval)
+                    time.sleep(self.poll_interval)
                     continue
 
                 # Compute timezone offset on first successful fetch
@@ -399,6 +399,14 @@ class MT5DataHandler:
                 # copy_rates_from_pos returns oldest-first; process chronologically
                 sorted_rates = list(rates)
 
+                # On the first poll, restrict to the most recent N bars (warm-up
+                # window) so the engine does not replay the full 7 000-bar history
+                # as if it were live data.  Subsequent polls process the entire
+                # array to catch any bars that completed while we slept.
+                if last_yield_time is None:
+                    warmup_count = self.max_bars or 500
+                    sorted_rates = sorted_rates[-warmup_count:]
+
                 for rate in sorted_rates:
                     # MT5 returns bar times as epoch seconds. Apply computed timezone offset
                     # to align with UTC if the terminal uses local/server time.
@@ -423,7 +431,7 @@ class MT5DataHandler:
                             yield r
                         last_yield_time = rate_time
 
-                time.sleep(poll_interval)
+                time.sleep(self.poll_interval)
 
         else:
             raise ValueError(f'Unknown mode: {self.mode}')

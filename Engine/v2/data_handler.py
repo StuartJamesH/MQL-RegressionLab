@@ -76,6 +76,7 @@ class V2MT5DataHandler(MT5DataHandler):
             start=start,
             end=end,
             max_bars=self.history_bars,
+            poll_interval=self.poll_interval,
         )
 
         # In live mode, perform the warm-up fetch immediately so the strategy
