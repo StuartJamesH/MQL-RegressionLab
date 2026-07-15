@@ -77,10 +77,17 @@ class V2MT5LiveExecutionHandler(MT5LiveExecutionHandler):
             _LOG.warning("Position %d not found in MT5 — skipping SL update", ticket)
             return False
 
+        # Re-send the TP alongside the new SL; TRADE_ACTION_SLTP replaces both,
+        # and omitting tp clears the existing take-profit.
+        current_tp = 0.0
+        if self.ticket_book is not None and ticket in self.ticket_book._tickets:
+            current_tp = self.ticket_book._tickets[ticket].tp or 0.0
+
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "position": ticket,
             "sl": new_sl,
+            "tp": current_tp,
         }
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
