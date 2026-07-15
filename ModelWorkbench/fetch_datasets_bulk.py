@@ -24,15 +24,19 @@ from Learn.data import fetch_ohlcv_bulk
 
 SYMBOL_NAMES = [
     'BTCUSD',
-    "US500",
-    "EURUSD",
-    "XAUUSD",
-    'SpotCrude',
+    'EURUSD',
+    'XAUUSD',
+    'XAGUSD',
+    'GBPUSD',
+    'USDJPY',
+    # 'SpotCrude',
+    # 'US500',
+
 ]
 
-NUM_CHUNKS = 52 * 5 # 3 years of weekly data, split into 1-week chunks
+NUM_CHUNKS = 52 * 3 # 3 years of weekly data, split into 1-week chunks
 WEEKS_PER_CHUNK = 1
-PERIOD_STR = "M5"
+PERIOD_STR = "M1"
 
 # When True, write one CSV per symbol to data/ using the same naming convention
 # as fetch_ohlcv(). When False, return DataFrames and print a short preview.
