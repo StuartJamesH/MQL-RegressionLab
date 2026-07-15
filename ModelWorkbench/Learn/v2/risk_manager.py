@@ -19,7 +19,7 @@ class RiskConfig:
     max_total_exposure_pct: float = 0.15
     trailing_stop_atr_mult: float = 1.5
     take_profit_atr_mult: float = 3.0
-    hard_stop_pct: float = 0.02  # 2% of account
+    hard_stop_pct: float = 0.002  # 0.2% of entry price (emergency backstop)
     atr_window: int = 14
 
     def __post_init__(self):

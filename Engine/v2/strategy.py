@@ -490,6 +490,64 @@ class V2SignalStrategy:
         return [order]
 
     # ------------------------------------------------------------------
+    # Trailing-stop update
+    # ------------------------------------------------------------------
+
+    def apply_trailing_stops(self, bar) -> None:
+        """
+        Compute and apply trailing-stop updates for all open positions.
+
+        Called once per bar after order processing.  For each open position,
+        computes a trailing SL using the current bar's High/Low and the
+        configured ATR multiplier, then sends the updated SL to MT5 via the
+        executor if it has moved in the favourable direction.
+
+        Parameters
+        ----------
+        bar :
+            Current completed bar with ``High``, ``Low`` fields (as yielded
+            by the data handler).
+        """
+        if self.ticket_book is None:
+            return
+
+        open_positions = list(self.ticket_book.get_open_positions())
+        if not open_positions:
+            return
+
+        current_atr = self._compute_atr(self._buffer, self.risk_config.atr_window)
+        if current_atr <= 0:
+            return
+
+        for record in open_positions:
+            direction = 1 if record.side == "buy" else -1
+            current_sl = record.sl or 0.0
+
+            current_bar = {
+                "High": float(bar.High),
+                "Low": float(bar.Low),
+                "Close": float(bar.Close),
+                "atr": current_atr,
+            }
+
+            position_info = {
+                "direction": direction,
+                "trailing_sl": current_sl,
+                "entry_price": record.entry_price,
+            }
+
+            new_sl = self._risk_manager.update_trailing_stop(
+                position_info, current_bar
+            )
+
+            if new_sl != current_sl:
+                _LOG.info(
+                    "Trailing stop updated for ticket=%d: %.5f -> %.5f",
+                    record.ticket, current_sl, new_sl,
+                )
+                self.mt5_executor.modify_position_sl(record.ticket, new_sl)
+
+    # ------------------------------------------------------------------
     # Trade-log row helper
     # ------------------------------------------------------------------
 

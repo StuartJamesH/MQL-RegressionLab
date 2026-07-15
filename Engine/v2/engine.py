@@ -69,6 +69,7 @@ class V2LiveEngine:
             bar_time = _bar_time_as_utc(bar)
             self.executor.process_pending_batch(bar_time)
             self.executor.process_position_updates_batch(bar_time)
+            self.strategy.apply_trailing_stops(bar)
 
         result = {
             "bars_processed": self._bars_processed,
