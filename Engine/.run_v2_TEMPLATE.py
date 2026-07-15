@@ -23,8 +23,10 @@ from dotenv import load_dotenv
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MODEL_WORKBENCH = _REPO_ROOT / "ModelWorkbench"
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_MODEL_WORKBENCH) not in sys.path:
-    sys.path.insert(0, str(_MODEL_WORKBENCH))
+    sys.path.insert(1, str(_MODEL_WORKBENCH))
 
 from Engine.Engine import configure_logging
 from Engine.TicketBook import TicketBook
