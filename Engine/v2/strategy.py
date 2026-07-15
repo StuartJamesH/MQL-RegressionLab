@@ -118,6 +118,8 @@ class V2SignalStrategy:
         self._last_signal: float = 0.0
         self._last_inference_latency_ms: Optional[float] = None
         self._last_error: Optional[str] = None
+        self._last_bar_time: Optional[datetime] = None
+        self._live_ready: bool = False
 
         # CSV trade log
         self._trade_log_path = self._init_trade_log(pack)
@@ -312,15 +314,37 @@ class V2SignalStrategy:
         """
         Process one completed bar and return zero or one :class:`Order`.
 
-        During warm-up (fewer than ``config.max_seq_len`` bars in the buffer)
-        an empty list is returned.  If a pending order or open position exists
-        for the symbol, inference is skipped and an empty list is returned.
+        During warm-up (fewer than ``config.max_seq_len`` bars in the buffer
+        OR the initial historical-burst phase still in progress) an empty list
+        is returned.  The burst phase is detected by tracking inter-bar
+        wall-clock gaps: bars arriving within 5 seconds of each other are
+        considered part of the warm-up burst and suppressed.
+
+        If a pending order or open position exists for the symbol, inference
+        is skipped and an empty list is returned.
         """
         self._append_bar(bar)
         self._bar_count += 1
 
         bar_time = pd.to_datetime(getattr(bar, "Time", _utc_now()))
         close = float(bar.Close)
+
+        # Detect the transition from historical warm-up burst to live bars.
+        # During the initial poll the data handler yields hundreds of completed
+        # bars in a tight loop (milliseconds apart).  Once live, bars arrive
+        # with natural timeframe gaps.  A 5-second inter-arrival threshold
+        # cleanly separates the two phases for all practical timeframes.
+        now = _utc_now()
+        if self._last_bar_time is not None:
+            if (now - self._last_bar_time).total_seconds() > 5.0:
+                if not self._live_ready:
+                    _LOG.info(
+                        "Live mode detected after %d bars (gap=%.1fs)",
+                        self._bar_count,
+                        (now - self._last_bar_time).total_seconds(),
+                    )
+                self._live_ready = True
+        self._last_bar_time = now
 
         # Health log every 100 bars.
         if self._bar_count % 100 == 0:
@@ -334,8 +358,10 @@ class V2SignalStrategy:
                 self._last_error,
             )
 
-        # Warm-up guard.
-        if len(self._buffer) < self.config.max_seq_len:
+        # Warm-up guard: suppress orders until buffer is full AND the initial
+        # historical-burst warm-up has been fully consumed (live bars detected).
+        if len(self._buffer) < self.config.max_seq_len or not self._live_ready:
+            action = "warmup" if len(self._buffer) < self.config.max_seq_len else "warmup_burst"
             self._log_bar(
                 bar_time=bar_time,
                 bar=bar,
@@ -346,7 +372,7 @@ class V2SignalStrategy:
                 sl=None,
                 tp=None,
                 lots=None,
-                action="warmup",
+                action=action,
             )
             return []
 
