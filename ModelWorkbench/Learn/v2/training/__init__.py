@@ -1,5 +1,6 @@
 from Learn.v2.training.pretrain import MaskedPatchPretraining
 from Learn.v2.training.pretrain_data import MultiInstrumentDataset
+from Learn.v2.training.dataset import FinetuneDataset
 from Learn.v2.training.finetune import DistributionalFinetuning
 from Learn.v2.training.rl_finetune import RLPolicyFinetuning
 from Learn.v2.training.metrics import TrainingMetricsTracker
@@ -14,6 +15,7 @@ from Learn.v2.training.losses import (
 __all__ = [
     "MaskedPatchPretraining",
     "MultiInstrumentDataset",
+    "FinetuneDataset",
     "DistributionalFinetuning",
     "RLPolicyFinetuning",
     "TrainingMetricsTracker",

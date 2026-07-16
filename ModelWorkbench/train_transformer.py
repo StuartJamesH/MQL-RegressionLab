@@ -21,58 +21,20 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+import copy
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import DataLoader, random_split
 
 warnings.filterwarnings("ignore")
 
 from Learn.v2.model.config import ModelConfig
 from Learn.v2.model.full_model import TradeForecastTransformer, ModelOutput
-from Learn.v2.labels import (
-    compute_directional_return_distribution,
-    compute_volatility_regime_labels,
-    LabelStore,
-)
-from Learn.v2.data import normalize_ohlcv, SessionFeatureEncoder
+from Learn.v2.training.dataset import FinetuneDataset, DEFAULT_HORIZONS
 from Learn.v2.deploy import DeploymentPackager
 from Learn.v2.feature_spec import FeatureSpec
 from Learn.train_utils import load_ohlcv
-
-
-# Model expects 5 OHLCV channels: O, H, L, C, V
-DEFAULT_HORIZONS = [5, 10, 20, 40, 60, 120]
-
-
-def compute_atr_normalized_targets(df, horizons, atr_window=14):
-    """
-    Compute ATR-normalized forward excursion scores as targets.
-    
-    For each bar t and horizon h, computes:
-        score = (buy_MFE - buy_MAE) / max(buy_MFE + buy_MAE, 1e-8)
-    
-    This produces a signed score in [-1, 1] where:
-        +1 = price only moved favorably (pure win)
-        -1 = price only moved adversely (pure loss)
-         0 = equal movement or no movement
-    
-    The MFE/MAE values are in ATR units, making the target scale-invariant.
-    """
-    import talib
-    from Learn.v2.labels import compute_forward_excursion_surface
-    
-    excursion = compute_forward_excursion_surface(df, horizons, atr_window=atr_window)
-    # excursion shape: (n_bars, n_horizons, 2, 2) — [buy_mfe, buy_mae], [sell_mfe, sell_mae]
-    buy_mfe = excursion[:, :, 0, 0]  # (n_bars, n_horizons)
-    buy_mae = excursion[:, :, 0, 1]
-    
-    # Normalized trade quality score: MFE advantage over MAE
-    denom = np.maximum(buy_mfe + buy_mae, 1e-8)
-    score = (buy_mfe - buy_mae) / denom  # range [-1, 1]
-    
-    # Fill NaN (last horizon rows) with 0
-    score = np.nan_to_num(score, nan=0.0)
-    return score.astype(np.float32)
 
 
 def parse_args():
@@ -126,55 +88,11 @@ def parse_args():
                         help="Target type: log_return=forward log returns, atr_score=ATR-normalized MFE/MAE score.")
     parser.add_argument("--weight-decay", type=float, default=1e-4,
                         help="Weight decay for AdamW optimizer.")
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="Number of DataLoader workers (0=main process only).")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Early stopping patience in epochs (0=disabled). Tracks val_spearman_mean.")
     return parser.parse_args()
-
-
-def prepare_ohlcv_windows(
-    ds_path: str,
-    n_rows: int,
-    seq_len: int,
-    target_type: str = "log_return",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Load, normalize, and create sliding windows from an OHLCV CSV.
-
-    Returns:
-        X_raw: (n_windows, seq_len, 5) — normalized OHLCV
-        X_sess: (n_windows, seq_len, 4) — session features (hour_sin/cos, dow_sin/cos)
-        labels: (n_windows, n_horizons) — targets depending on target_type
-    """
-    df = load_ohlcv(ds_path, n_rows=n_rows)
-    print(f"  Loaded {ds_path}: {len(df)} rows")
-
-    # Normalize OHLCV
-    X_raw = normalize_ohlcv(df)  # (n_bars, 5)
-
-    # Session features (include temporal gap flag for cross-instrument sessions)
-    encoder = SessionFeatureEncoder()
-    times = pd.to_datetime(df["Time"])
-    X_sess = encoder.encode(times, include_gap=True)  # (n_bars, 5)
-
-    # Label: directional return distribution or ATR-normalized score
-    if target_type == "atr_score":
-        labels = compute_atr_normalized_targets(df, DEFAULT_HORIZONS)
-    else:
-        labels = compute_directional_return_distribution(df, DEFAULT_HORIZONS)
-
-    # Create sliding windows (causal: window i...i+seq_len-1 predicts label at i+seq_len-1)
-    n_bars = len(X_raw)
-    n_windows = max(0, n_bars - seq_len)
-    
-    windows_raw = np.zeros((n_windows, seq_len, 5), dtype=np.float32)
-    windows_sess = np.zeros((n_windows, seq_len, 5), dtype=np.float32)
-    windows_labels = np.zeros((n_windows, len(DEFAULT_HORIZONS)), dtype=np.float32)
-    
-    for i in range(n_windows):
-        windows_raw[i] = X_raw[i:i + seq_len]
-        windows_sess[i] = X_sess[i:i + seq_len]
-        # Label at the last bar of the window
-        windows_labels[i] = labels[i + seq_len - 1]
-
-    return windows_raw, windows_sess, windows_labels
 
 
 def main():
@@ -207,46 +125,37 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {total_params:,} total, {trainable_params:,} trainable parameters")
 
-    # Prepare data
+    # Prepare data — uses memory-efficient FinetuneDataset (2D arrays only,
+    # windows sliced on-the-fly in __getitem__)
     print("\n--- Loading Data ---")
-    all_raw = []
-    all_sess = []
-    all_labels = []
-    for ds_path in args.ds_names:
-        raw, sess, lbl = prepare_ohlcv_windows(ds_path, args.n_rows, args.seq_len, args.target_type)
-        all_raw.append(raw)
-        all_sess.append(sess)
-        all_labels.append(lbl)
-
-    X_raw = np.concatenate(all_raw, axis=0)
-    X_sess = np.concatenate(all_sess, axis=0)
-    y_labels = np.concatenate(all_labels, axis=0)
-
-    # Filter windows with NaN labels (caused by max_horizon tail)
-    valid = ~np.isnan(y_labels).any(axis=1) & ~np.isnan(X_raw).any(axis=(1, 2)) & ~np.isnan(X_sess).any(axis=(1, 2))
-    if valid.sum() < len(valid):
-        n_filtered = len(valid) - valid.sum()
-        X_raw = X_raw[valid]
-        X_sess = X_sess[valid]
-        y_labels = y_labels[valid]
-        print(f"Filtered {n_filtered} windows with NaN labels/features")
-
-    print(f"Total windows: {len(X_raw):,}")
-
-    # Convert to tensors
-    X_raw_t = torch.from_numpy(X_raw).float()
-    X_sess_t = torch.from_numpy(X_sess).float()
-    y_t = torch.from_numpy(y_labels).float()
+    dataset = FinetuneDataset(
+        ds_paths=args.ds_names,
+        n_rows=args.n_rows,
+        seq_len=args.seq_len,
+        target_type=args.target_type,
+        horizons=DEFAULT_HORIZONS,
+    )
 
     # Train/validation split
     val_frac = args.val_split
-    n_train = int(len(X_raw_t) * (1.0 - val_frac))
-    indices = torch.randperm(len(X_raw_t))
-    train_idx, val_idx = indices[:n_train], indices[n_train:]
-    X_train_raw, X_val_raw = X_raw_t[train_idx], X_raw_t[val_idx]
-    X_train_sess, X_val_sess = X_sess_t[train_idx], X_sess_t[val_idx]
-    y_train, y_val = y_t[train_idx], y_t[val_idx]
-    print(f"Train windows: {len(train_idx):,}  |  Val windows: {len(val_idx):,}")
+    n_total = len(dataset)
+    n_train = int(n_total * (1.0 - val_frac))
+    n_val = n_total - n_train
+
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset = random_split(
+        dataset, [n_train, n_val], generator=generator,
+    )
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=True, drop_last=False,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=args.batch_size * 2, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True,
+    )
+    print(f"Total windows: {n_total:,}  |  Train: {n_train:,}  |  Val: {n_val:,}")
 
     # Create output directory for logs
     model_name = args.model_name or f"transformer_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -267,11 +176,17 @@ def main():
     # Per-epoch metrics history (saved to JSON)
     epoch_metrics: list[dict] = []
 
+    # Early stopping state
+    best_spearman = -float("inf")
+    patience_counter = 0
+    best_state_dict = None
+
     # Training loop (Phase 2: Distributional Finetuning)
     print(f"\n{'='*80}")
     print(f"{'Epoch':>6s} | {'Train Loss':>10s} | {'Val Loss':>10s} | {'Val Sprmn':>10s} | {'Dir Acc':>8s} | {'LR':>9s} | {'Grad Norm':>10s}")
+    if args.patience > 0:
+        print(f"  Patience: {args.patience} (best Spearman: -inf)")
     print(f"{'='*80}")
-    model.train()
 
     for epoch in range(args.finetune_epochs):
         # ---- TRAIN ----
@@ -280,12 +195,10 @@ def main():
         n_batches = 0
         max_grad_norm = 0.0
 
-        indices_t = torch.randperm(len(X_train_raw))
-        for i in range(0, len(X_train_raw), args.batch_size):
-            batch_idx = indices_t[i:i + args.batch_size]
-            batch_raw = X_train_raw[batch_idx].to(device)
-            batch_sess = X_train_sess[batch_idx].to(device)
-            batch_y = y_train[batch_idx].to(device)
+        for batch_raw, batch_sess, batch_y in train_loader:
+            batch_raw = batch_raw.to(device)
+            batch_sess = batch_sess.to(device)
+            batch_y = batch_y.to(device)
 
             optimizer.zero_grad()
             output: ModelOutput = model(batch_raw, batch_sess)
@@ -324,29 +237,31 @@ def main():
         # ---- VALIDATE ----
         model.eval()
         val_loss = 0.0
+        val_n_batches = 0
         val_pred_mu = []
         val_pred_log_sigma = []
         val_pred_direction = []
         val_true = []
 
         with torch.no_grad():
-            for i in range(0, len(X_val_raw), args.batch_size * 2):
-                batch_raw = X_val_raw[i:i + args.batch_size * 2].to(device)
-                batch_sess = X_val_sess[i:i + args.batch_size * 2].to(device)
-                batch_y = y_val[i:i + args.batch_size * 2].to(device)
+            for batch_raw, batch_sess, batch_y in val_loader:
+                batch_raw = batch_raw.to(device)
+                batch_sess = batch_sess.to(device)
+                batch_y = batch_y.to(device)
 
                 output = model(batch_raw, batch_sess)
                 mu, log_sigma = output.distribution
                 sigma = torch.exp(torch.clamp(log_sigma, min=-10.0, max=10.0)) + 1e-6
                 nll = 0.5 * torch.log(2 * torch.pi * sigma ** 2) + 0.5 * ((batch_y - mu) / sigma) ** 2
                 val_loss += nll.mean().item()
+                val_n_batches += 1
 
                 val_pred_mu.append(mu.cpu().numpy())
                 val_pred_log_sigma.append(log_sigma.cpu().numpy())
                 val_pred_direction.append(torch.sigmoid(output.direction).cpu().numpy())
                 val_true.append(batch_y.cpu().numpy())
 
-        avg_val_loss = val_loss / max(i // (args.batch_size * 2) + 1, 1)
+        avg_val_loss = val_loss / max(val_n_batches, 1)
 
         # Concatenate validation predictions
         val_mu_all = np.concatenate(val_pred_mu, axis=0)
@@ -397,11 +312,33 @@ def main():
         }
         epoch_metrics.append(epoch_record)
 
+        # ---- EARLY STOPPING ----
+        if args.patience > 0:
+            if mean_spearman > best_spearman:
+                improved_by = mean_spearman - best_spearman
+                best_spearman = mean_spearman
+                patience_counter = 0
+                best_state_dict = copy.deepcopy(model.state_dict())
+                print(f"  >> New best Spearman: {best_spearman:.4f} (+{improved_by:.6f}), patience reset")
+            else:
+                patience_counter += 1
+                if patience_counter >= args.patience:
+                    print(f"  >> Early stopping triggered at epoch {epoch+1} "
+                          f"(patience={args.patience}, best Spearman={best_spearman:.4f})")
+                    break
+
         # Print epoch summary
         print(f"{epoch+1:5d}/{args.finetune_epochs:<3d} | {avg_train_loss:10.6f} | {avg_val_loss:10.6f} | "
               f"{mean_spearman:10.4f} | {dir_accuracy:7.4f} | {current_lr:8.2e} | {max_grad_norm:10.4f}")
 
     print(f"{'='*80}")
+
+    # Restore best model if early stopping was used
+    if args.patience > 0 and best_state_dict is not None:
+        model.load_state_dict(best_state_dict)
+        print(f"Restored best model (val Spearman={best_spearman:.4f})")
+    elif args.patience > 0:
+        print(f"No improvement recorded; using final model weights")
 
     # Save per-epoch metrics to JSON log
     with open(metrics_log_path, "w") as f:
