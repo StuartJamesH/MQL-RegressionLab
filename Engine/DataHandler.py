@@ -251,6 +251,7 @@ class MT5DataHandler:
         self.poll_interval = poll_interval
         # Timezone offset detected during live polling (in seconds)
         self.tz_offset_seconds = 0
+        self._stop: bool = False
 
         if mt5 is None:
             raise RuntimeError('MetaTrader5 package not available. Install with `pip install MetaTrader5`')
@@ -348,7 +349,7 @@ class MT5DataHandler:
             tz_offset_seconds = 0
             tz_offset_computed = False
 
-            while True:
+            while not self._stop:
                 # Get current UTC time for completion check
                 now = pd.to_datetime(datetime.utcnow(), utc=True)
                 
@@ -436,8 +437,17 @@ class MT5DataHandler:
         else:
             raise ValueError(f'Unknown mode: {self.mode}')
 
+    def stop(self) -> None:
+        """Signal the live polling loop to exit gracefully.
+
+        This sets a flag checked by ``get_next_bar()`` in live mode so the
+        generator exits on the next poll cycle rather than blocking forever.
+        """
+        self._stop = True
+
     def shutdown(self) -> None:
         """Cleanly shut down the connection to the MT5 terminal."""
+        self.stop()
         try:
             mt5.shutdown()
         except Exception:

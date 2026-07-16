@@ -84,6 +84,8 @@ class V2LiveEngine:
         executor / strategy resources.
         """
         self._shutdown_requested = True
+        if hasattr(self.data_handler, "stop"):
+            self.data_handler.stop()
         if hasattr(self.executor, "shutdown"):
             self.executor.shutdown()
         if hasattr(self.strategy, "close"):

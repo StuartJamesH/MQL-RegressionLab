@@ -91,9 +91,19 @@ def main() -> None:
 
     engine = V2LiveEngine(data_handler, strategy, executor)
 
+    _signal_count = [0]
+
     def _signal_handler(signum, frame):
-        log.info("Received signal %s — shutting down", signum)
-        engine.shutdown()
+        _signal_count[0] += 1
+        if _signal_count[0] == 1:
+            log.info(
+                "Received signal %s — requesting graceful shutdown "
+                "(press again to force exit)", signum
+            )
+            engine.shutdown()
+        else:
+            log.info("Received signal %s again — forcing exit", signum)
+            os._exit(1)
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
