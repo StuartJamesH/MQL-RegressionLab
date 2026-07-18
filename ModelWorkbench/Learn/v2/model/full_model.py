@@ -84,6 +84,19 @@ class TradeForecastTransformer(nn.Module):
 
         self.apply(self._init_weights)
 
+        # Rescale DistributionHead outputs for realistic initial predictions.
+        # Default Kaiming init interacts with 4 transformer layers to produce
+        # CLS tokens with std ~ 4-5, giving mu ~ ±10 and sigma ~ 500-3000.
+        # Scale both halves down so the model starts near the data scale.
+        if self.distribution_head is not None:
+            with torch.no_grad():
+                last_linear = self.distribution_head.mlp[-1]
+                n_h = config.n_horizons
+                last_linear.weight.data[:n_h] *= 1e-3       # mu → ~0.001
+                last_linear.bias.data[:n_h] *= 1e-3
+                last_linear.weight.data[n_h:] *= 0.2          # log_sigma → σ ~ 2
+                last_linear.bias.data[n_h:] *= 0.2
+
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
         if isinstance(module, nn.Linear):

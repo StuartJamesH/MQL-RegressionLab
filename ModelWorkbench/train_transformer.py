@@ -92,6 +92,8 @@ def parse_args():
                         help="Number of DataLoader workers (0=main process only).")
     parser.add_argument("--patience", type=int, default=0,
                         help="Early stopping patience in epochs (0=disabled). Tracks val_spearman_mean.")
+    parser.add_argument("--fix-sigma", action="store_true",
+                        help="Fix sigma=1.0 (disable learnable uncertainty). Forces the model to learn mu only.")
     return parser.parse_args()
 
 
@@ -205,9 +207,13 @@ def main():
 
             # Numerically stable Gaussian NLL
             mu, log_sigma = output.distribution
-            sigma = torch.exp(torch.clamp(log_sigma, min=-10.0, max=10.0)) + 1e-6
-            nll = 0.5 * torch.log(2 * torch.pi * sigma ** 2) + 0.5 * ((batch_y - mu) / sigma) ** 2
-            loss = nll.mean()
+            if args.fix_sigma:
+                loss = 0.9189385 + 0.5 * (batch_y - mu) ** 2
+                loss = loss.mean()
+            else:
+                sigma = torch.exp(torch.clamp(log_sigma, min=-10.0, max=10.0)) + 1e-6
+                nll = 0.5 * torch.log(2 * torch.pi * sigma ** 2) + 0.5 * ((batch_y - mu) / sigma) ** 2
+                loss = nll.mean()
 
             # Auxiliary direction loss (predict sign of return)
             if args.direction_weight > 0:
@@ -251,9 +257,13 @@ def main():
 
                 output = model(batch_raw, batch_sess)
                 mu, log_sigma = output.distribution
-                sigma = torch.exp(torch.clamp(log_sigma, min=-10.0, max=10.0)) + 1e-6
-                nll = 0.5 * torch.log(2 * torch.pi * sigma ** 2) + 0.5 * ((batch_y - mu) / sigma) ** 2
-                val_loss += nll.mean().item()
+                if args.fix_sigma:
+                    val_nll = 0.9189385 + 0.5 * (batch_y - mu) ** 2
+                    val_loss += val_nll.mean().item()
+                else:
+                    sigma = torch.exp(torch.clamp(log_sigma, min=-10.0, max=10.0)) + 1e-6
+                    nll = 0.5 * torch.log(2 * torch.pi * sigma ** 2) + 0.5 * ((batch_y - mu) / sigma) ** 2
+                    val_loss += nll.mean().item()
                 val_n_batches += 1
 
                 val_pred_mu.append(mu.cpu().numpy())
